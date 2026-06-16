@@ -8,6 +8,12 @@ from models import Despesa, Receita, Carteira, Orcamento, MetaSimples
 from banco import DBManager
 from utils import SanitizadorMonetario
 from exportador import ExportadorCSV
+from observers import (
+    SujeitoFinanceiro,
+    LogObservador,
+    AlertaOrcamentoObservador,
+    NotificadorMetaObservador,
+)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,7 +25,15 @@ class PorquinhoBot:
         load_dotenv()
         self.token = os.getenv("TELEGRAM_TOKEN")
         self.db = DBManager()
-        
+
+        # Observer pattern: o bot é o "Sujeito" que notifica observadores
+        # sempre que uma transação é registrada. Para adicionar um novo
+        # comportamento, basta inscrever outro observador aqui.
+        self.publicador = SujeitoFinanceiro()
+        self.publicador.adicionar_observador(LogObservador())
+        self.publicador.adicionar_observador(AlertaOrcamentoObservador(self.db))
+        self.publicador.adicionar_observador(NotificadorMetaObservador(self.db))
+
     def _obter_teclado_menu(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
@@ -54,13 +68,13 @@ class PorquinhoBot:
 
     async def processar_clique_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer() 
-        
+        await query.answer()
+
         if query.data == 'menu_extrato': await self.exibir_extrato(update, context)
         elif query.data == 'menu_exportar': await self.exportar_dados(update, context)
         elif query.data == 'menu_orcamento': await self.ver_status_orcamentos(update, context)
         elif query.data == 'menu_metas': await self.ver_status_metas(update, context)
-            
+
         elif query.data == 'menu_gasto':
             await query.edit_message_text("🐷 *Oinc oinc! Novo Gasto:*\nDigite: `/gasto <valor> <categoria>`", parse_mode="Markdown")
         elif query.data == 'menu_receita':
@@ -77,14 +91,22 @@ class PorquinhoBot:
     async def registrar_movimentacao(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user_id = update.effective_user.id
-            valor = SanitizadorMonetario.limpar_valor(context.args[0]) 
+            valor = SanitizadorMonetario.limpar_valor(context.args[0])
             categoria = " ".join(context.args[1:])
             comando = update.message.text.split()[0]
-            
+
             transacao = Despesa(valor, categoria) if "/gasto" in comando else Receita(valor, categoria)
             msg = f"🐷 *Oinc oinc!* ✅ Registro efetuado no cofrinho com sucesso!"
 
             self.db.salvar_transacao(transacao, user_id)
+
+            # Notifica os observadores sobre a nova transação. Eles podem
+            # devolver alertas (ex.: orçamento estourado, meta atingida).
+            contexto = {"usuario_id": user_id, "db": self.db}
+            self.publicador.notificar(transacao, contexto)
+            for alerta in contexto.get("alertas", []):
+                msg += f"\n\n{alerta}"
+
             await update.message.reply_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
         except:
             await update.message.reply_text("🐷 *Oinc!* ❌ Deu erro! Use o formato: `/gasto 50 Pizza`", parse_mode="Markdown")
@@ -94,12 +116,12 @@ class PorquinhoBot:
             user_id = update.effective_user.id
             id_para_remover = int(context.args[0])
             foi_removido = self.db.remover_transacao(id_para_remover, user_id)
-            
+
             if foi_removido:
                 msg = f"🐷 *Oinc oinc!* 🗑️ Registro ID {id_para_remover} removido com sucesso!"
             else:
                 msg = f"🐷 *Oinc!* ⚠️ Registro ID {id_para_remover} não encontrado na sua conta."
-                
+
             await update.message.reply_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
         except:
             await update.message.reply_text("🐷 *Oinc!* Uso: `/remover <ID>`", parse_mode="Markdown")
@@ -107,21 +129,21 @@ class PorquinhoBot:
     async def exibir_extrato(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         dados = self.db.listar_tudo(user_id)
-        
+
         if not dados:
             msg = "🐷 *Oinc!* Nenhum registro encontrado. O cofrinho está vazio!"
         else:
             msg = "🐷 *Oinc oinc! \nExtrato Geral do Cofrinho:*\n"
             carteira_temp = Carteira()
-            
+
             for item in dados:
                 tipo = "⬆️" if item[5] == "Receita" else "⬇️"
                 msg += f"ID: {item[0]} | {tipo} {item[3]}: R$ {item[2]:.2f}\n"
                 t = Receita(item[2], item[3]) if item[5] == "Receita" else Despesa(item[2], item[3])
                 carteira_temp.adicionar_transacao(t)
-            
+
             msg += f"\n💰 *Saldo Atual: R$ {carteira_temp.saldo:.2f}*"
-        
+
         if update.callback_query:
             await update.callback_query.edit_message_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
         else:
@@ -197,7 +219,7 @@ class PorquinhoBot:
             gastos = self.db.listar_por_categoria(cat, user_id)
             total = sum([i[2] for i in gastos if i[5] == "Despesa"])
             msg += Orcamento(cat, teto, total).obter_status() + "\n"
-        
+
         target = update.callback_query if update.callback_query else update.message
         if update.callback_query: await target.edit_message_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
         else: await target.reply_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
@@ -225,7 +247,7 @@ class PorquinhoBot:
     async def ver_status_metas(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         metas = self.db.listar_metas(user_id)
-        
+
         msg = "🐷 *Oinc oinc! 🎯 Painel de Metas do Cofrinho:*\n\n"
         if not metas:
             msg += "Você ainda não tem nenhuma meta ativa.\n\n"
@@ -235,18 +257,18 @@ class PorquinhoBot:
                 obj.poupar(m[3])
                 msg += f"*(ID: {m[0]})* " + obj.exibir_status() + "\n"
             msg += "\n"
-            
+
         msg += "📝 *Comandos Interativos:*\n"
         msg += "➕ *Criar nova:* `/meta <valor> <Nome>` (Ex: `/meta 1500 Manutencao Gol`)\n"
         msg += "💰 *Guardar dinheiro:* `/poupar <ID> <valor>` (Ex: `/poupar 1 150`)\n"
-            
+
         target = update.callback_query if update.callback_query else update.message
         if update.callback_query: await target.edit_message_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
         else: await target.reply_text(msg, reply_markup=self._obter_teclado_menu(), parse_mode="Markdown")
 
     def run(self):
         app = ApplicationBuilder().token(self.token).build()
-        
+
         app.add_handler(CommandHandler("start", self.exibir_menu))
         app.add_handler(CommandHandler("menu", self.exibir_menu))
         app.add_handler(CommandHandler("gasto", self.registrar_movimentacao))
@@ -263,7 +285,7 @@ class PorquinhoBot:
         app.add_handler(CommandHandler("poupar", self.depositar_meta))
         app.add_handler(CommandHandler("status_metas", self.ver_status_metas))
         app.add_handler(CallbackQueryHandler(self.processar_clique_menu))
-        
+
         print("🐷 PorquinhoBot Online e fazendo Oinc Oinc!")
         app.run_polling()
 

@@ -27,10 +27,71 @@ A estrutura de arquivos foi pensada para separar as responsabilidades do código
 * `main.py`: Ponto de entrada do bot, gerencia a interface com a API do Telegram e os comandos do usuário.
 * `models.py`: Contém as regras de negócio e as classes do domínio (`Transacao`, `Despesa`, `Receita`, `Meta`, `Carteira`).
 * `banco.py`: Classe `DBManager` responsável pela comunicação e queries no SQLite.
+* `observers.py`: Implementação do **Observer pattern** (sujeito e observadores de transações).
 * `exportador.py`: Lógica para formatar e exportar os dados do usuário.
 * `utils.py`: Funções auxiliares e de formatação.
 * `requirements.txt`: Lista de dependências do projeto.
 * `data/financas.db`: Arquivo local do banco de dados (gerado automaticamente).
+
+---
+
+## 🔔 Observer Pattern (Padrão Observador)
+
+Além de POO, o projeto aplica o **Observer**, um padrão de projeto comportamental. Ele cria uma relação *um-para-muitos*: quando um evento acontece no **Sujeito** (Subject), todos os **Observadores** (Observers) inscritos são notificados e reagem de forma automática e independente.
+
+No PorquinhoBot, o evento observado é o **registro de uma nova transação**. Toda a lógica vive em `observers.py`:
+
+* `ObservadorTransacao` — a interface (classe abstrata) que todo observador implementa, com o método `atualizar(transacao, contexto)`.
+* `SujeitoFinanceiro` — o sujeito, que mantém a lista de observadores (`adicionar_observador`, `remover_observador`) e dispara as notificações (`notificar`).
+* Observadores concretos, cada um com uma responsabilidade única:
+  * `LogObservador` — registra a movimentação no log (auditoria).
+  * `AlertaOrcamentoObservador` — avisa quando uma despesa estoura o teto do orçamento.
+  * `NotificadorMetaObservador` — comemora quando uma meta é atingida.
+
+**Por que isso segue boas práticas?** O `main.py` apenas dispara `notificar(...)` e não sabe *quem* vai reagir nem *como*. Isso mantém o **baixo acoplamento** e respeita o **princípio Aberto/Fechado**: para adicionar um novo comportamento (ex.: enviar e-mail, atualizar um dashboard), você cria uma nova classe e a inscreve — sem alterar o código existente. Um observador que falhar é isolado (a falha é logada) e não derruba os demais nem o bot.
+
+### Como usar no código
+
+```python
+from observers import SujeitoFinanceiro, LogObservador, AlertaOrcamentoObservador
+from models import Despesa
+
+# 1. Crie o sujeito e inscreva os observadores desejados
+publicador = SujeitoFinanceiro()
+publicador.adicionar_observador(LogObservador())
+publicador.adicionar_observador(AlertaOrcamentoObservador(db))
+
+# 2. Ao registrar uma transação, notifique os observadores
+transacao = Despesa(50, "lazer")
+db.salvar_transacao(transacao, usuario_id)
+
+contexto = {"usuario_id": usuario_id, "db": db}
+publicador.notificar(transacao, contexto)
+
+# 3. Leia eventuais alertas devolvidos pelos observadores
+for alerta in contexto["alertas"]:
+    print(alerta)  # ex.: enviar de volta ao usuário no Telegram
+```
+
+No bot, essa integração já está pronta: o `PorquinhoBot` cria o `publicador` no construtor e chama `notificar(...)` dentro de `registrar_movimentacao`, anexando os alertas à resposta enviada ao usuário.
+
+### Como criar um novo observador
+
+Basta herdar de `ObservadorTransacao`, implementar `atualizar` e inscrevê-lo:
+
+```python
+from observers import ObservadorTransacao
+
+class MeuObservador(ObservadorTransacao):
+    def atualizar(self, transacao, contexto):
+        # sua lógica aqui (ex.: somar pontos, enviar webhook...)
+        contexto["alertas"].append("🐷 Algo aconteceu!")
+
+# em main.py, dentro de __init__:
+self.publicador.adicionar_observador(MeuObservador())
+```
+
+Nenhum outro arquivo precisa ser modificado.
 
 ---
 
