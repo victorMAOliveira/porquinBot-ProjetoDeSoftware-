@@ -24,9 +24,11 @@ O bot foi construído de forma modular e conta com as seguintes funcionalidades:
 
 A estrutura de arquivos foi pensada para separar as responsabilidades do código:
 
-* `main.py`: Ponto de entrada do bot, gerencia a interface com a API do Telegram e os comandos do usuário.
+* `main.py`: Ponto de entrada do bot, gerencia a interface com a API do Telegram e os comandos do usuário. Conversa apenas com a `FinancasFacade`.
 * `models.py`: Contém as regras de negócio e as classes do domínio (`Transacao`, `Despesa`, `Receita`, `Meta`, `Carteira`).
-* `banco.py`: Classe `DBManager` responsável pela comunicação e queries no SQLite.
+* `banco.py`: Classe `DBManager` (um **Singleton**) responsável pela comunicação e queries no SQLite.
+* `singleton.py`: Implementação do **Singleton pattern** (metaclasse `SingletonMeta`).
+* `fachada.py`: Implementação do **Facade pattern** (`FinancasFacade`), que unifica os subsistemas.
 * `observers.py`: Implementação do **Observer pattern** (sujeito e observadores de transações).
 * `exportador.py`: Lógica para formatar e exportar os dados do usuário.
 * `utils.py`: Funções auxiliares e de formatação.
@@ -92,6 +94,62 @@ self.publicador.adicionar_observador(MeuObservador())
 ```
 
 Nenhum outro arquivo precisa ser modificado.
+
+---
+
+## 🏭 Singleton Pattern (Padrão Criacional)
+
+O **Singleton** é um padrão de projeto *criacional* que garante que uma classe tenha **apenas uma instância** durante toda a execução e oferece um **ponto de acesso global** a ela.
+
+No PorquinhoBot ele é aplicado ao `DBManager` (`banco.py`). Só deve existir **um** gerenciador do banco: ele centraliza o caminho do arquivo SQLite, a criação das tabelas e todas as consultas. Sem o Singleton, cada parte do código poderia criar o seu próprio `DBManager`, gerando inicializações repetidas e o risco de instâncias apontando para arquivos diferentes.
+
+A mágica fica em `singleton.py`, na metaclasse `SingletonMeta`:
+
+* Ela intercepta a "chamada" da classe (`DBManager()`).
+* Na **primeira** vez, cria o objeto e o guarda num cache.
+* Nas vezes seguintes, devolve o **mesmo** objeto — o `__init__` não roda de novo.
+* É **thread-safe** (usa um *lock* com *double-checked locking*).
+
+```python
+from banco import DBManager
+
+a = DBManager()
+b = DBManager()
+assert a is b  # mesma instância em todo o projeto
+```
+
+**Por que metaclasse e não `__new__`?** Com a metaclasse, qualquer classe vira Singleton só declarando `metaclass=SingletonMeta`, e o `__init__` da classe alvo não precisa de gambiarras para evitar reexecução. O método `resetar_instancia()` existe apenas para facilitar os testes (estado limpo entre cenários).
+
+---
+
+## 🎛️ Facade Pattern (Padrão Estrutural)
+
+O **Facade** é um padrão de projeto *estrutural* que oferece uma **interface única e simplificada** para um conjunto de subsistemas mais complexos.
+
+Antes, para registrar uma despesa o `main.py` precisava coordenar vários módulos: `SanitizadorMonetario` (limpar o valor), `Despesa`/`Receita` (criar o objeto), `DBManager` (persistir), `SujeitoFinanceiro` + observadores (disparar alertas) e ainda `Carteira`/`Orcamento`/`MetaSimples`/`ExportadorCSV` para formatar e exportar. Isso espalhava regra de negócio pelos handlers do Telegram.
+
+A `FinancasFacade` (`fachada.py`) concentra toda essa orquestração. Cada método é um caso de uso completo (`registrar_movimentacao`, `obter_extrato`, `exportar_csv`, `status_metas`...) e devolve o texto pronto (ou o arquivo). O `main.py` passa a conversar com **um único objeto**:
+
+```python
+from fachada import FinancasFacade
+
+financas = FinancasFacade()
+msg = financas.registrar_movimentacao("/gasto", ["50", "Pizza"], usuario_id)
+# 'msg' já vem com a confirmação e eventuais alertas dos observers
+```
+
+**Benefícios:** os handlers ficam enxutos e cuidam só da conversa com o Telegram (Responsabilidade Única), o acoplamento do `main.py` cai de muitos módulos para um só, e a fachada ainda integra naturalmente os outros padrões — ela cria o `DBManager` **Singleton** e monta o **Observer** internamente. O Facade não esconde os subsistemas: quem precisar ainda pode usá-los diretamente.
+
+---
+
+## 🧪 Testes
+
+```bash
+python test_observers.py   # padrão Observer
+python test_patterns.py    # padrões Singleton e Facade
+```
+
+Ambos rodam num banco SQLite temporário e não afetam o seu `data/financas.db`.
 
 ---
 

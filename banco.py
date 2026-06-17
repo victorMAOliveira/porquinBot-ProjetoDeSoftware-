@@ -1,8 +1,16 @@
 import sqlite3
 import os
 from models import Despesa, Receita
+from singleton import SingletonMeta
 
-class DBManager:
+class DBManager(metaclass=SingletonMeta):
+    """Gerenciador único (Singleton) de acesso ao banco SQLite.
+
+    Graças à metaclasse ``SingletonMeta``, qualquer ``DBManager()`` ao longo do
+    código devolve sempre a MESMA instância. O construtor roda uma única vez,
+    então as tabelas são inicializadas apenas na primeira chamada.
+    """
+
     def __init__(self, db_name="financas.db"):
         if not os.path.exists('data'):
             os.makedirs('data')
